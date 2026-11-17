@@ -1,0 +1,23 @@
+{
+  "_comment": "检验员/报告回归样本：两表各一行且关联值固定。report(lab_id, reviewer_id) 引用 reviewer，源约束为 ON DELETE SET NULL (reviewer_id)：删除检验员后报告必须留在原实验室，只把 reviewer_id 置空，lab_id（NOT NULL 且属报告主键）保持不变。",
+  "schema_name": "public",
+  "tables": [
+    {
+      "table": "reviewer",
+      "rows": 1,
+      "ranges": {
+        "lab_id":      {"low": 7,  "high": 7},
+        "reviewer_id": {"low": 42, "high": 42}
+      }
+    },
+    {
+      "table": "report",
+      "rows": 1,
+      "ranges": {
+        "lab_id":     {"low": 7,   "high": 7},
+        "report_id":  {"low": 900, "high": 900},
+        "reviewer_id": {"low": 42, "high": 42}
+      }
+    }
+  ]
+}

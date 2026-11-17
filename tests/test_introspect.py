@@ -15,7 +15,14 @@ from app.introspect import (
 def test_lists_only_base_tables(source_dsn):
     with source_connection(source_dsn) as conn:
         base, others = list_base_tables(conn, "public")
-    assert set(base) == {"dept", "employee", "project", "assignment"}
+    assert set(base) == {
+        "dept",
+        "employee",
+        "project",
+        "assignment",
+        "reviewer",
+        "report",
+    }
     assert others == []
 
 
@@ -46,6 +53,25 @@ def test_introspects_full_structure(source_dsn):
     assert full_fk.columns == ["dept_id", "dept_code"]
     assert full_fk.match.value == "MATCH FULL"
     assert full_fk.not_deferrable is True
+
+
+def test_partial_set_null_column_list_is_introspected(source_dsn):
+    with source_connection(source_dsn) as conn:
+        schemas = introspect_tables(conn, "public", ["reviewer", "report", "dept"])
+    report = schemas["report"]
+    fk = next(f for f in report.foreign_keys if f.name == "report_reviewer_fk")
+    assert fk.columns == ["lab_id", "reviewer_id"]
+    assert fk.ref_table == "reviewer"
+    assert fk.on_delete == "SET NULL"
+    assert fk.on_delete_set_columns == ["reviewer_id"]
+    assert fk.delete_set_columns == ["reviewer_id"]
+    # Plain whole-key SET NULL keeps an empty column list (None).
+    # (dept can only be introspected together with its FK cycle target employee.)
+    dept = schemas["dept"]
+    plain = next(f for f in dept.foreign_keys if f.name == "dept_parent_fk")
+    assert plain.on_delete == "SET NULL"
+    assert plain.on_delete_set_columns is None
+    assert plain.delete_set_columns == ["parent_dept"]
 
 
 def test_missing_table_rejected(source_dsn):

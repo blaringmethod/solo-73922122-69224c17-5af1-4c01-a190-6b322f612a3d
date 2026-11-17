@@ -15,6 +15,9 @@
 - 复合外键 `MATCH SIMPLE` 与 `MATCH FULL`
 - 自引用外键、跨表循环外键（含传递闭包）
 - `NOT DEFERRABLE` 与 `DEFERRABLE [INITIALLY ...]` 外键，原样保留可延迟性
+- 外键动作原样保留，包括 PostgreSQL 15+ 的
+  `ON DELETE SET NULL (col, ...)` **置空列清单**（只置空列出的列，
+  其余键列——即使属于 NOT NULL 主键——保留原值）
 
 **明确拒绝（不会静默忽略）**：非整数列、`CHECK`、`EXCLUDE`、列 `DEFAULT`、
 `IDENTITY`/生成列、触发器、独立唯一索引（部分/表达式索引）、视图、物化视图、
@@ -27,6 +30,12 @@
 - 内省只查询 `pg_catalog` / `information_schema`，绝不 `SELECT` 用户表行；
 - 部署的 `app_ro` 角色对用户表无任何表级权限（实测读行返回 `42501`、写返回 `25006`）；
 - 验证在独立的验证集群上为每个作业新建隔离空库，结束后删除；
+- 验证先逐字段比对“装载后的目录”与源库结构（列、主键/唯一键、外键列、
+  `MATCH`、`ON UPDATE/DELETE` 及 `SET NULL` 列清单、可延迟性），再执行负向探测；
+- 对 `ON DELETE SET NULL (col, ...)` 在隔离库中实际删除父行，断言只置空指定列、
+  子行保留且其余键列不变；探测全部在 savepoint 内回滚，并在前后比对整库快照，
+  证明探测不改变最终样本；
+- 动作校验失败即作业失败，不发布、不提供任何部分包；
 - 不关闭任何约束、不把即时约束改写为延迟约束；循环外键通过「先建表→插数据→
   再 `ALTER TABLE ADD CONSTRAINT`」的结构方式装载；
 - 失败不产出、不提供任何部分包，下载仅在 `SUCCEEDED` 后可用。
@@ -87,7 +96,7 @@ docker compose up --build
 | --- | --- |
 | `01_schema.sql` | `CREATE TABLE`，内联主键/唯一键（不含外键） |
 | `02_data.sql` | 恰好等于请求行数的 `INSERT`，NULL 显式输出 |
-| `03_constraints.sql` | 全部外键 `ALTER TABLE ADD CONSTRAINT`（处理循环），可延迟性子句原样保留 |
+| `03_constraints.sql` | 全部外键 `ALTER TABLE ADD CONSTRAINT`（处理循环），可延迟性子句与 `ON DELETE SET NULL (col, ...)` 列清单原样保留 |
 | `manifest.json` | 行数、区间、约束清单、`contains_real_patient_data=false` |
 | `README.md` | 装载说明 |
 
@@ -108,11 +117,14 @@ employee.dept_id    → dept.dept_id         ┘ 跨表循环
 employee.mentor_id  → employee.emp_id         自引用
 project(dept_id,dept_code) MATCH FULL → dept(dept_id,dept_code)  复合外键
 assignment(emp_id,project_id) → employee / project              复合主键+双外键
+report(lab_id,reviewer_id) → reviewer(lab_id,reviewer_id)
+    ON DELETE SET NULL (reviewer_id)                            部分置空列清单
 ```
 
 对应请求见 `examples/request_cyclic_four_tables.json`；无解示例见
 `examples/request_unsat_conflict.json`；闭包扩展示例见
-`examples/request_closure_single.json`。
+`examples/request_closure_single.json`；检验员/报告“只置空审核人、lab_id 不动”
+示例见 `examples/request_reviewer_report.json`。
 
 ## 本地自测（无需 Docker）
 
@@ -139,6 +151,6 @@ PYTHONPATH=. .venv/bin/python -m pytest tests/
 app/            FastAPI + 内省 + z3 求解 + SQL 渲染 + 隔离库验证
 sql/            循环引用检验表源结构、源库初始化（只读角色）
 examples/       循环四表、无解冲突、闭包扩展三类请求示例
-tests/          34 个单元/集成/端到端测试（真实 PostgreSQL）
+tests/          46 个单元/集成/端到端测试（真实 PostgreSQL）
 docker-compose.yml / Dockerfile / requirements.txt
 ```

@@ -171,6 +171,10 @@ def _introspect_constraints(
                   FROM unnest(con.confkey) WITH ORDINALITY AS u2(attnum, ord)
                   JOIN pg_catalog.pg_attribute a2
                     ON a2.attrelid = con.confrelid AND a2.attnum = u2.attnum) AS ref_cols,
+               (SELECT array_agg(a3.attname ORDER BY u3.ord)
+                  FROM unnest(con.confdelsetcols) WITH ORDINALITY AS u3(attnum, ord)
+                  JOIN pg_catalog.pg_attribute a3
+                    ON a3.attrelid = con.conrelid AND a3.attnum = u3.attnum) AS del_set_cols,
                fn.nspname AS fschema, fc.relname AS ftable,
                pg_get_constraintdef(con.oid) AS condef
         FROM pg_catalog.pg_constraint con
@@ -195,6 +199,7 @@ def _introspect_constraints(
         upd,
         del_,
         ref_cols,
+        del_set_cols,
         fschema,
         ftable,
         condef,
@@ -237,6 +242,25 @@ def _introspect_constraints(
             if upd == "d" or del_ == "d":
                 rej.append((obj, "不支持 ON ... SET DEFAULT 外键动作（不生成默认值）"))
                 continue
+            # PostgreSQL 15+ supports ``ON DELETE SET NULL (col, ...)``; the
+            # column list is part of the constraint's semantics (only those
+            # columns are nulled, the rest of the key — possibly its NOT NULL
+            # columns — is preserved). It must survive the round trip.
+            set_columns = list(del_set_cols) if del_set_cols else None
+            if del_ == "n" and set_columns is not None:
+                if not set_columns:
+                    rej.append((obj, "无法解析 ON DELETE SET NULL 的置空列清单"))
+                    continue
+                unknown = [c for c in set_columns if c not in cols]
+                if unknown:
+                    rej.append(
+                        (
+                            obj,
+                            "ON DELETE SET NULL 置空列清单 "
+                            f"({', '.join(unknown)}) 不属于外键列",
+                        )
+                    )
+                    continue
             fks.append(
                 ForeignKey(
                     name=conname,
@@ -246,6 +270,7 @@ def _introspect_constraints(
                     match=match,
                     on_update=action_map[upd],
                     on_delete=action_map[del_],
+                    on_delete_set_columns=set_columns if del_ == "n" else None,
                     not_deferrable=not deferrable,
                     initially_deferred=bool(deferred),
                 )

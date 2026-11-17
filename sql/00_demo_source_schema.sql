@@ -1,6 +1,7 @@
 -- ============================================================
 -- Demo source schema: cyclic referential graph used for the
--- circular-reference worked example in /examples.
+-- circular-reference worked example in /examples, plus the
+-- reviewer/report pair used for the partial SET NULL regression.
 --
 -- All columns are integer; no patient/real data is included.
 --
@@ -10,6 +11,8 @@
 --   employee.mentor_id ─► employee.emp_id       (self reference)
 --   project (dept_id, dept_code) MATCH FULL ─► dept (dept_id, dept_code)
 --   assignment (emp_id, project_id) ─► employee / project, composite UK
+--   report (lab_id, reviewer_id) ─► reviewer (lab_id, reviewer_id)
+--       ON DELETE SET NULL (reviewer_id)   -- partial column list
 -- ============================================================
 
 DROP SCHEMA IF EXISTS public CASCADE;
@@ -71,3 +74,30 @@ ALTER TABLE dept
     ADD CONSTRAINT dept_mgr_fk FOREIGN KEY (mgr_emp)
         REFERENCES employee (emp_id) MATCH SIMPLE
         ON DELETE SET NULL ON UPDATE CASCADE NOT DEFERRABLE;
+
+-- ------------------------------------------------------------------
+-- Reviewer / report: (lab_id, reviewer_id) links a report to its
+-- reviewer. lab_id is NOT NULL and is also part of the report primary
+-- key, so a DELETE of the reviewer may only null reviewer_id -- never
+-- lab_id. The source constraint therefore uses the partial column list
+--   ON DELETE SET NULL (reviewer_id)
+-- (PostgreSQL 15+). A generated package that omits the column list
+-- would null the whole key and be rejected by report_pk / NOT NULL.
+-- ------------------------------------------------------------------
+CREATE TABLE reviewer (
+    lab_id       integer NOT NULL,
+    reviewer_id  integer NOT NULL,
+    CONSTRAINT reviewer_pk PRIMARY KEY (lab_id, reviewer_id)
+);
+
+CREATE TABLE report (
+    lab_id       integer NOT NULL,
+    report_id    integer NOT NULL,
+    reviewer_id  integer,                      -- nullable: the only SET NULL target
+    CONSTRAINT report_pk PRIMARY KEY (lab_id, report_id),
+    CONSTRAINT report_reviewer_fk
+        FOREIGN KEY (lab_id, reviewer_id)
+        REFERENCES reviewer (lab_id, reviewer_id) MATCH SIMPLE
+        ON UPDATE NO ACTION ON DELETE SET NULL (reviewer_id)
+        NOT DEFERRABLE
+);

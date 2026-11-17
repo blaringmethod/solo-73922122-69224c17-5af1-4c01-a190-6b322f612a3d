@@ -1,6 +1,8 @@
 """SQL rendering guarantees: deferrability preserved, cycles via post-data FKs."""
 from __future__ import annotations
 
+import json
+
 from app.models import (
     Column,
     ForeignKey,
@@ -24,6 +26,122 @@ def _col(name, nullable=False, pg_type="integer"):
         is_identity=False,
         is_generated=False,
     )
+
+
+def _fk(name, columns, ref_table, ref_columns, **kw):
+    base = dict(
+        name=name,
+        columns=columns,
+        ref_table=ref_table,
+        ref_columns=ref_columns,
+        match=MatchType.SIMPLE,
+        on_update="NO ACTION",
+        on_delete="NO ACTION",
+        not_deferrable=True,
+        initially_deferred=False,
+    )
+    base.update(kw)
+    return ForeignKey(**base)
+
+
+def test_partial_set_null_column_list_rendered():
+    reviewer = TableSchema(
+        schema_name="public",
+        name="reviewer",
+        columns=[_col("lab_id"), _col("reviewer_id")],
+        unique_constraints=[
+            UniqueConstraint(
+                name="reviewer_pk", columns=["lab_id", "reviewer_id"], is_primary=True
+            )
+        ],
+        foreign_keys=[],
+    )
+    report = TableSchema(
+        schema_name="public",
+        name="report",
+        columns=[_col("lab_id"), _col("report_id"), _col("reviewer_id", nullable=True)],
+        unique_constraints=[
+            UniqueConstraint(
+                name="report_pk", columns=["lab_id", "report_id"], is_primary=True
+            )
+        ],
+        foreign_keys=[
+            _fk(
+                "report_reviewer_fk",
+                ["lab_id", "reviewer_id"],
+                "reviewer",
+                ["lab_id", "reviewer_id"],
+                on_delete="SET NULL",
+                on_delete_set_columns=["reviewer_id"],
+            )
+        ],
+    )
+    specs = {
+        "reviewer": TableSpec(
+            table="reviewer",
+            rows=1,
+            ranges={
+                "lab_id": IntRange(low=7, high=7),
+                "reviewer_id": IntRange(low=42, high=42),
+            },
+        ),
+        "report": TableSpec(
+            table="report",
+            rows=1,
+            ranges={
+                "lab_id": IntRange(low=7, high=7),
+                "report_id": IntRange(low=900, high=900),
+                "reviewer_id": IntRange(low=42, high=42),
+            },
+        ),
+    }
+    data = Generator({"reviewer": reviewer, "report": report}, specs).solve()
+    pkg = build_package(
+        {"reviewer": reviewer, "report": report}, ["reviewer", "report"], specs, data
+    )
+    fk_ddl = [ln for ln in pkg["03_constraints.sql"].splitlines() if ln.startswith("ALTER TABLE")][0]
+    assert "ON DELETE SET NULL (\"reviewer_id\")" in fk_ddl
+    assert "NOT DEFERRABLE" in fk_ddl
+    manifest = json.loads(pkg["manifest.json"])
+    assert manifest["constraints"]["report"]["foreign_keys"][0][
+        "on_delete_set_null_columns"
+    ] == ["reviewer_id"]
+
+
+def test_plain_set_null_has_no_column_list():
+    parent = TableSchema(
+        schema_name="public",
+        name="p",
+        columns=[_col("id")],
+        unique_constraints=[
+            UniqueConstraint(name="pk_p", columns=["id"], is_primary=True)
+        ],
+        foreign_keys=[],
+    )
+    child = TableSchema(
+        schema_name="public",
+        name="c",
+        columns=[_col("id"), _col("pid", nullable=True)],
+        unique_constraints=[
+            UniqueConstraint(name="pk_c", columns=["id"], is_primary=True)
+        ],
+        foreign_keys=[
+            _fk("c_fk", ["pid"], "p", ["id"], on_delete="SET NULL")
+        ],
+    )
+    specs = {
+        "p": TableSpec(table="p", rows=1, ranges={"id": IntRange(low=1, high=1)}),
+        "c": TableSpec(
+            table="c",
+            rows=1,
+            ranges={"id": IntRange(low=10, high=10), "pid": IntRange(low=1, high=1)},
+        ),
+    }
+    data = Generator({"p": parent, "c": child}, specs).solve()
+    pkg = build_package({"p": parent, "c": child}, ["p", "c"], specs, data)
+    fk_ddl = [ln for ln in pkg["03_constraints.sql"].splitlines() if ln.startswith("ALTER TABLE")][0]
+    assert "ON DELETE SET NULL" in fk_ddl
+    assert "(" not in fk_ddl.split("ON DELETE SET NULL")[1]
 
 
 def test_not_deferrable_fk_stays_immediate():

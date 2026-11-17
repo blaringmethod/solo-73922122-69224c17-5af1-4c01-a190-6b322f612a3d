@@ -63,8 +63,24 @@ class ForeignKey(BaseModel):
     match: MatchType
     on_update: str
     on_delete: str
+    #: ``ON DELETE SET NULL (col, ...)`` column list. ``None`` means the whole
+    #: foreign-key key is set to NULL (plain ``SET NULL``). PostgreSQL only
+    #: supports a column list on ON DELETE, never on ON UPDATE.
+    on_delete_set_columns: list[str] | None = None
     not_deferrable: bool
     initially_deferred: bool
+
+    @property
+    def delete_set_columns(self) -> list[str]:
+        """Columns that a parent DELETE actually nulls.
+
+        Plain ``SET NULL`` nulls every foreign-key column; a column-list form
+        nulls only the listed subset (the remaining key columns keep their
+        values and, when NOT NULL, stay in the child row).
+        """
+        if self.on_delete == "SET NULL":
+            return list(self.on_delete_set_columns or self.columns)
+        return []
 
 
 class TableSchema(BaseModel):

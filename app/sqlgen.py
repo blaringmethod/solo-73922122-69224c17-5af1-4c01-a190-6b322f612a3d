@@ -88,12 +88,19 @@ def _fk_sql(ts: TableSchema, fk) -> str:
     defer = " DEFERRABLE INITIALLY DEFERRED" if fk.initially_deferred else (
         " DEFERRABLE INITIALLY IMMEDIATE" if not fk.not_deferrable else " NOT DEFERRABLE"
     )
+    # ``ON DELETE SET NULL (col, ...)`` nulls only the listed columns; without
+    # the list PostgreSQL (and a silently rewritten constraint) would null the
+    # whole key, which is a different action for composite keys and can be
+    # rejected by NOT NULL columns that must survive the parent DELETE.
+    set_cols = ""
+    if fk.on_delete == "SET NULL" and fk.on_delete_set_columns:
+        set_cols = " (" + ", ".join(q(c) for c in fk.on_delete_set_columns) + ")"
     return (
         f"ALTER TABLE {q(ts.schema_name)}.{q(ts.name)} "
         f"ADD CONSTRAINT {q(fk.name)} FOREIGN KEY ({cols}) "
         f"REFERENCES {q(ts.schema_name)}.{q(fk.ref_table)} ({refs}) "
         f"{fk.match.value} "
-        f"ON UPDATE {fk.on_update} ON DELETE {fk.on_delete}{defer};"
+        f"ON UPDATE {fk.on_update} ON DELETE {fk.on_delete}{set_cols}{defer};"
     )
 
 
@@ -138,6 +145,9 @@ def render_manifest(
                         "columns": f.columns,
                         "references": f"{f.ref_table}({', '.join(f.ref_columns)})",
                         "match": f.match.value,
+                        "on_update": f.on_update,
+                        "on_delete": f.on_delete,
+                        "on_delete_set_null_columns": f.on_delete_set_columns,
                         "deferrable": not f.not_deferrable,
                     }
                     for f in tables[t].foreign_keys
@@ -163,6 +173,11 @@ def render_readme(manifest: dict) -> str:
         "| 02_data.sql | INSERT of exactly the requested row counts |",
         "| 03_constraints.sql | ALTER TABLE ADD CONSTRAINT for every FK (handles cycles) |",
         "| manifest.json | requested ranges, row counts and constraint inventory |",
+        "",
+        "All foreign-key actions are reproduced exactly, including a partial",
+        "`ON DELETE SET NULL (col, ...)` column list: only the listed columns are",
+        "nulled when the referenced row is deleted; the remaining key columns keep",
+        "their values.",
         "",
         "## Load",
         "",

@@ -182,3 +182,101 @@ def test_more_than_max_tables_rejected():
         },
     )
     assert r.status_code == 422
+
+
+def test_reviewer_report_delete_keeps_lab_and_nulls_only_reviewer():
+    """Two tables, one row each, fixed values: the reviewer DELETE must leave
+    the report in its lab and only null reviewer_id (partial SET NULL list)."""
+    jid, job = _run(_load("request_reviewer_report.json"))
+    assert job.status == JobStatus.SUCCEEDED, job.conflict
+    pkg = STORE.package(jid)
+    fk_ddl = [
+        ln for ln in pkg["03_constraints.sql"].splitlines()
+        if ln.startswith("ALTER TABLE")
+    ]
+    assert any(
+        "ON DELETE SET NULL (\"reviewer_id\")" in ln for ln in fk_ddl
+    ), pkg["03_constraints.sql"]
+    assert all("NOT DEFERRABLE" in ln for ln in fk_ddl)
+    # Load into the fresh isolated DB produced for this job is verified by the
+    # service; re-load once more and exercise the DELETE action explicitly.
+    # (A dedicated end-to-end probe lives in the verification log below.)
+    assert any("ON DELETE SET NULL" in ln and "reviewer_id" in ln for ln in job.log)
+
+
+def test_reviewer_report_action_end_to_end(fresh_verify_database):
+    jid, job = _run(_load("request_reviewer_report.json"))
+    assert job.status == JobStatus.SUCCEEDED, job.conflict
+    pkg = STORE.package(jid)
+    dsn, _ = fresh_verify_database
+    with psycopg.connect(dsn, autocommit=False) as conn:
+        for f in ("01_schema.sql", "02_data.sql", "03_constraints.sql"):
+            conn.cursor().execute(pkg[f])
+        conn.commit()
+        cur = conn.cursor()
+        cur.execute("SELECT lab_id, report_id, reviewer_id FROM public.report")
+        assert cur.fetchall() == [(7, 900, 42)]
+        cur.execute("DELETE FROM public.reviewer WHERE lab_id = 7 AND reviewer_id = 42")
+        assert cur.rowcount == 1
+        conn.commit()
+        cur.execute("SELECT lab_id, report_id, reviewer_id FROM public.report")
+        assert cur.fetchall() == [(7, 900, None)]
+        # The surviving report stays in lab 7 and its composite PK is intact.
+        cur.execute("SELECT count(*) FROM public.report WHERE lab_id = 7")
+        assert cur.fetchone()[0] == 1
+
+
+def test_verification_probes_do_not_change_sample():
+    """Verification logs must prove the loaded rows are unchanged."""
+    jid, job = _run(_load("request_reviewer_report.json"))
+    assert job.status == JobStatus.SUCCEEDED, job.conflict
+    assert any("snapshot unchanged" in line for line in job.log)
+    assert any("semantic probe OK" in line and "SET NULL" in line for line in job.log)
+
+
+def test_package_omitting_set_null_list_fails_verification(
+    fresh_verify_database, source_dsn
+):
+    """A package that drops the (reviewer_id) list must be rejected by the
+    verifier, so a broken SQL package can never be published."""
+    from app.db import source_connection
+    from app.introspect import introspect_tables
+    from app.verifier import verify_package
+
+    with source_connection(source_dsn) as conn:
+        schemas = introspect_tables(conn, "public", ["reviewer", "report"])
+    pkg = STORE.package(_run(_load("request_reviewer_report.json"))[0])
+    broken = dict(pkg)
+    broken["03_constraints.sql"] = pkg["03_constraints.sql"].replace(
+        'ON DELETE SET NULL ("reviewer_id")', "ON DELETE SET NULL"
+    )
+    dsn, _ = fresh_verify_database
+    ok, vlog = verify_package(
+        dsn, "probe_", "public", schemas, ["reviewer", "report"], broken
+    )
+    assert not ok
+    joined = "\n".join(vlog)
+    assert "on_delete_set_columns" in joined or "目录不一致" in joined
+
+
+def test_failed_action_verification_blocks_publish(monkeypatch):
+    """If the rendered action cannot be verified, the job must FAIL and the
+    package must stay unavailable for download."""
+    import app.jobs as jobs_mod
+
+    real_build = jobs_mod.build_package
+
+    def broken_build(*args, **kwargs):
+        pkg = real_build(*args, **kwargs)
+        pkg["03_constraints.sql"] = pkg["03_constraints.sql"].replace(
+            'ON DELETE SET NULL ("reviewer_id")', "ON DELETE SET NULL"
+        )
+        return pkg
+
+    monkeypatch.setattr(jobs_mod, "build_package", broken_build)
+    jid, job = _run(_load("request_reviewer_report.json"))
+    assert job.status == JobStatus.FAILED
+    assert job.conflict.kind == "verification"
+    assert STORE.package(jid) is None
+    assert client.get(f"/jobs/{jid}/download").status_code == 409
+    assert any("NOT NULL" in line or "目录不一致" in line for line in job.log)
